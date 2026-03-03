@@ -1,4 +1,4 @@
-# Monocular SLAM
+﻿# Monocular SLAM
 
 Ground-up monocular Visual SLAM in C++17/CUDA targeting real-time performance on the KITTI odometry benchmark.
 

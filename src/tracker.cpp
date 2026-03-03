@@ -298,12 +298,22 @@ bool Tracker::track_with_motion_model(Frame::Ptr frame)
         return false;
     }
 
-    // solvePnPRansac returns CV_32S inlier index vector (not a bool mask)
+    // solvePnPRansac returns CV_32S index vector OR CV_8U mask depending on OpenCV version.
     std::vector<bool> is_inlier(pts3d.size(), false);
-    for (int k = 0; k < inlier_mask.rows; ++k)
-        is_inlier[inlier_mask.at<int>(k)] = true;
-    if (inlier_mask.rows < cfg_.pnp_min_inliers) {
-        std::cerr << "[Tracker] Track: PnP inliers too few (" << inlier_mask.rows << ")\n";
+    int n_inliers = 0;
+    if (inlier_mask.type() == CV_8U) {
+        // Mask mode: element k is 1 for inlier, 0 for outlier
+        for (int k = 0; k < inlier_mask.rows && k < (int)pts3d.size(); ++k)
+            if (inlier_mask.at<uint8_t>(k)) { is_inlier[k] = true; ++n_inliers; }
+    } else {
+        // Index mode (CV_32S): each element is an inlier index into pts3d
+        for (int k = 0; k < inlier_mask.rows; ++k) {
+            int idx = inlier_mask.at<int>(k);
+            if (idx >= 0 && idx < (int)pts3d.size()) { is_inlier[idx] = true; ++n_inliers; }
+        }
+    }
+    if (n_inliers < cfg_.pnp_min_inliers) {
+        std::cerr << "[Tracker] Track: PnP inliers too few (" << n_inliers << ")\n";
         return false;
     }
 
@@ -588,16 +598,24 @@ bool Tracker::try_relocalize(Frame::Ptr frame)
 
     if (!ok) { std::cerr << "[Reloc] solvePnPRansac failed\n"; return false; }
 
+    std::vector<bool> is_inlier(pts3d.size(), false);
+    int n_reloc_inliers = 0;
+    if (inlier_mask.type() == CV_8U) {
+        for (int k = 0; k < inlier_mask.rows && k < (int)pts3d.size(); ++k)
+            if (inlier_mask.at<uint8_t>(k)) { is_inlier[k] = true; ++n_reloc_inliers; }
+    } else {
+        for (int k = 0; k < inlier_mask.rows; ++k) {
+            int idx = inlier_mask.at<int>(k);
+            if (idx >= 0 && idx < (int)pts3d.size()) { is_inlier[idx] = true; ++n_reloc_inliers; }
+        }
+    }
+
     const int reloc_min = cfg_.pnp_min_inliers * 3;  // 45
-    if (inlier_mask.rows < reloc_min) {
-        std::cerr << "[Reloc] Inliers too few (" << inlier_mask.rows
+    if (n_reloc_inliers < reloc_min) {
+        std::cerr << "[Reloc] Inliers too few (" << n_reloc_inliers
                   << " < " << reloc_min << ")\n";
         return false;
     }
-
-    std::vector<bool> is_inlier(pts3d.size(), false);
-    for (int k = 0; k < inlier_mask.rows; ++k)
-        is_inlier[inlier_mask.at<int>(k)] = true;
 
     // ── LM refinement on inliers ──────────────────────────────────────────────
     std::vector<cv::Point3f> in3d;

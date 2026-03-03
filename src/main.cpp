@@ -210,10 +210,8 @@ int main(int argc, char** argv)
         // Track
         bool ok = tracker->track(frame);
 
-        // Start a new trajectory segment when the tracker goes LOST so the
-        // reinit discontinuity is never drawn as a line across the scene.
-        if (!ok && viz && map->num_keyframes() > 0)
-            viz->new_trajectory_segment();
+        // (Trajectory segmentation is handled automatically in log_trajectory()
+        //  via spatial-gap detection — no manual segment call needed here.)
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double track_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -228,9 +226,11 @@ int main(int argc, char** argv)
         auto t2 = std::chrono::high_resolution_clock::now();
         double ba_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
 
-        // Visualization — image every frame; map cloud every 10th keyframe
+        // Visualization — image/keypoints every frame; BA-aware trajectory every frame;
+        // map point cloud every keyframe.
         if (viz) {
             viz->log_frame(frame);
+            viz->log_trajectory(map, frame, ts);
             if (frame->is_keyframe)
                 viz->log_map(map, ts);
         }

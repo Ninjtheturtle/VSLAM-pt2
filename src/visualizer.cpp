@@ -3,13 +3,12 @@
 // Rerun.io C++ SDK logging for SLAM state.
 //
 // Rerun entity hierarchy:
-//   world/
-//     camera/
-//       image        — 2D image panel (via Pinhole set in log_pinhole)
-//       keypoints    — purple 2D keypoint dots in the image panel
-//     map/
-//       points       — Points3D (active map point cloud)
-//       trajectory   — LineStrips3D (camera centre history)
+//   world/camera/
+//     image                    — Pinhole + Transform3D + Image frames (creates 3D view + 2D panel)
+//     image/keypoints          — Points2D overlaid on image panel
+//     trajectory               — LineStrips3D (SLAM camera path, BA-refined)
+//     ground_truth/trajectory  — LineStrips3D (GT, static orange)
+//     map/points               — Points3D (active map point cloud)
 
 #include "slam/visualizer.hpp"
 
@@ -19,6 +18,7 @@
 #include <rerun/archetypes/points2d.hpp>
 #include <rerun/archetypes/points3d.hpp>
 #include <rerun/archetypes/line_strips3d.hpp>
+#include <rerun/archetypes/transform3d.hpp>
 #include <rerun/archetypes/view_coordinates.hpp>
 #include <rerun/components/color.hpp>
 
@@ -68,12 +68,20 @@ void Visualizer::log_pinhole(const Camera& cam)
     // Log Pinhole intrinsics to the image entity so Rerun renders:
     //   • a proper camera frustum in the 3D view
     //   • a 2D image panel showing the camera feed
-    rec_->log("world/camera/image",
+    rec_->log_static("world/camera/image",
         rerun::archetypes::Pinhole::from_focal_length_and_resolution(
             {(float)cam.fx, (float)cam.fy},
             {(float)cam.width, (float)cam.height}
         )
     );
+
+    // Anchor the camera at the world origin so Rerun auto-creates a 3D spatial
+    // view immediately, before any tracking occurs.  Per-frame log_frame() calls
+    // override this with the live pose once tracking begins.
+    rec_->log_static("world/camera/image",
+        rerun::archetypes::Transform3D::from_translation_rotation(
+            {0.0f, 0.0f, 0.0f},
+            rerun::datatypes::Quaternion::from_wxyz(1.0f, 0.0f, 0.0f, 0.0f)));
 }
 
 // ─── log_frame ───────────────────────────────────────────────────────────────
@@ -86,10 +94,21 @@ void Visualizer::log_frame(const Frame::Ptr& frame)
     // viewer can scrub through the sequence.
     rec_->set_time_seconds("time", frame->timestamp);
 
+    // ── Camera pose in world space → moves the 3D frustum each frame ────────────
+    if (frame->num_tracked() > 0) {
+        Eigen::Isometry3d  T_wc = frame->T_wc();
+        Eigen::Quaterniond q(T_wc.rotation());
+        Eigen::Vector3d    t = T_wc.translation();
+        rec_->log("world/camera/image",
+            rerun::archetypes::Transform3D::from_translation_rotation(
+                {(float)t.x(), (float)t.y(), (float)t.z()},
+                rerun::datatypes::Quaternion::from_wxyz(
+                    (float)q.w(), (float)q.x(), (float)q.y(), (float)q.z())));
+    }
+
     // ── Camera image → 2D panel ───────────────────────────────────────────────
-    // Log to world/camera/image. Rerun creates a dedicated 2D panel for any
-    // entity that has a Pinhole ancestor (set once in log_pinhole()).
-    // No Transform3D is logged here, so no camera frustum appears in the 3D view.
+    // Log to world/camera/image.  The static Pinhole set in log_pinhole() remains
+    // on this entity; the per-frame Image data goes here too.
     if (cfg_.log_image && !frame->image_gray.empty()) {
         cv::Mat rgb;
         cv::cvtColor(frame->image_gray, rgb, cv::COLOR_GRAY2RGB);
@@ -105,44 +124,73 @@ void Visualizer::log_frame(const Frame::Ptr& frame)
         pts.reserve(frame->keypoints.size());
         for (auto& kp : frame->keypoints)
             pts.push_back({kp.pt.x, kp.pt.y});
-        rec_->log("world/camera/keypoints",
+        rec_->log("world/camera/image/keypoints",
             rerun::archetypes::Points2D(pts)
                 .with_colors(rerun::components::Color(190, 75, 230, 220))
                 .with_radii(std::vector<float>(pts.size(), 2.5f)));
     }
 
-    // ── Trajectory (camera centre in world space) ─────────────────────────────
-    // Only append when the frame has a valid tracked pose (num_tracked > 0).
-    // Untracked frames (NOT_INITIALIZED / LOST) have T_cw = Identity, which
-    // would log (0,0,0) and make the trajectory appear to stall at the origin.
-    if (frame->num_tracked() > 0) {
-        Eigen::Vector3d t = frame->T_wc().translation();
-
-        if (strips_.empty()) strips_.emplace_back();
-        strips_.back().push_back({(float)t.x(), (float)t.y(), (float)t.z()});
-
-        // Collect all segments; include single-point segments so the Rerun
-        // entity is created on the very first tracked frame (size < 2 hid it).
-        std::vector<rerun::components::LineStrip3D> all_strips;
-        for (auto& seg : strips_) {
-            if (seg.empty()) continue;
-            std::vector<rerun::datatypes::Vec3D> pts3;
-            pts3.reserve(seg.size());
-            for (auto& p : seg) pts3.push_back({p[0], p[1], p[2]});
-            all_strips.emplace_back(pts3);
-        }
-        if (!all_strips.empty()) {
-            rec_->log("world/camera/trajectory",
-                rerun::archetypes::LineStrips3D(all_strips));
-        }
-    }
 }
 
-// ─── new_trajectory_segment ──────────────────────────────────────────────────
+// ─── log_trajectory ──────────────────────────────────────────────────────────
+//
+// Rebuilds the green trajectory every call from the map's BA-refined keyframes,
+// then appends the current live frame's PnP position if it is tracked and not
+// yet a keyframe.  Because it reads directly from map->all_keyframes(), any
+// pose corrections produced by local_ba->optimize() are reflected automatically
+// on the very next call — no stale append-only buffer to worry about.
+//
+// Consecutive keyframes more than kSegmentGapThreshold metres apart are split
+// into separate strips so that reinit gaps never draw a line across the scene.
 
-void Visualizer::new_trajectory_segment()
+void Visualizer::log_trajectory(const Map::Ptr& map,
+                                 const Frame::Ptr& current_frame,
+                                 double ts)
 {
-    strips_.emplace_back();  // next log_frame() appends to a fresh strip
+    if (!rec_) return;
+    rec_->set_time_seconds("time", ts);
+
+    auto kfs = map->all_keyframes();   // oldest-first, per Map::all_keyframes() contract
+
+    constexpr double kGapSq = 50.0 * 50.0;  // 50 m gap → new strip segment
+
+    // Build segments from keyframe camera centres (BA-refined).
+    std::vector<std::vector<rerun::datatypes::Vec3D>> segments;
+    Eigen::Vector3d last_c;
+    bool has_last = false;
+
+    for (auto& kf : kfs) {
+        Eigen::Vector3d c = kf->camera_center();
+        if (!has_last || (c - last_c).squaredNorm() > kGapSq) {
+            segments.emplace_back();
+        }
+        segments.back().push_back({(float)c.x(), (float)c.y(), (float)c.z()});
+        last_c   = c;
+        has_last = true;
+    }
+
+    // Append the current live frame (PnP estimate) if it is tracked but not
+    // yet promoted to a keyframe — avoids duplicating the just-inserted KF.
+    if (current_frame && current_frame->num_tracked() > 0 && !current_frame->is_keyframe) {
+        Eigen::Vector3d c = current_frame->camera_center();
+        if (!has_last || (c - last_c).squaredNorm() > kGapSq) {
+            segments.emplace_back();
+        }
+        if (segments.empty()) segments.emplace_back();
+        segments.back().push_back({(float)c.x(), (float)c.y(), (float)c.z()});
+    }
+
+    if (segments.empty()) return;
+
+    std::vector<rerun::components::LineStrip3D> strips;
+    strips.reserve(segments.size());
+    for (auto& seg : segments)
+        strips.emplace_back(seg);
+
+    rec_->log("world/camera/trajectory",
+        rerun::archetypes::LineStrips3D(strips)
+            .with_colors({rerun::components::Color(0, 255, 128)})   // bright green
+            .with_radii(std::vector<float>(strips.size(), 0.5f)));
 }
 
 // ─── log_map ─────────────────────────────────────────────────────────────────
@@ -183,7 +231,8 @@ void Visualizer::log_ground_truth(const std::vector<std::array<float, 3>>& cente
     rec_->log_static("world/camera/ground_truth/trajectory",
         rerun::archetypes::LineStrips3D(
             {rerun::components::LineStrip3D(pts)})
-            .with_colors({rerun::components::Color(255, 165, 0)}));  // orange
+            .with_colors({rerun::components::Color(255, 165, 0)})  // orange
+            .with_radii({0.5f}));
 }
 
 }  // namespace slam

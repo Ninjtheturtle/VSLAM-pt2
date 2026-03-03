@@ -45,12 +45,16 @@ public:
     /// Log the current frame: image, pose, 2-D keypoints
     void log_frame(const Frame::Ptr& frame);
 
-    /// Log the current map: 3-D point cloud + trajectory line
+    /// Log the current map: 3-D point cloud
     void log_map(const Map::Ptr& map, double timestamp = 0.0);
 
-    /// Start a new trajectory segment (call when tracker goes LOST / reinits).
-    /// Prevents the discontinuous jump from being drawn as a line in the viewer.
-    void new_trajectory_segment();
+    /// Log the SLAM trajectory, rebuilt every call from BA-refined keyframe poses.
+    /// Also appends the current live frame position if it is tracked and not yet
+    /// a keyframe.  Call this every frame — it automatically reflects the latest
+    /// BA refinement without any extra bookkeeping.
+    void log_trajectory(const Map::Ptr& map,
+                        const Frame::Ptr& current_frame,
+                        double ts);
 
     /// Overlay ground-truth camera centres as a static orange trajectory.
     /// Call once before the main loop with all GT poses loaded from
@@ -64,9 +68,7 @@ private:
     Camera cam_;   // stored from log_pinhole(); used for depth projection in log_frame()
     std::unique_ptr<rerun::RecordingStream> rec_;
 
-    // Each inner vector is one continuous trajectory segment.
-    // A new segment is started on every reinit to avoid jump artifacts.
-    std::vector<std::vector<std::array<float, 3>>> strips_;
+    // No trajectory buffer: trajectory is rebuilt from map->all_keyframes() every call.
 };
 
 }  // namespace slam
