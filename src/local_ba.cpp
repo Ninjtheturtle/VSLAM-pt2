@@ -164,6 +164,141 @@ class AnalyticReprojectionCostFunction
     ReprojectionCost cost_;
 };
 
+// ─── Stereo Analytical Cost Function ──────────────────────────────────────────
+//
+// Residuals (3):
+//   r[0] = u_L_proj - u_L_obs
+//   r[1] = v_L_proj - v_L_obs
+//   r[2] = u_R_proj - u_R_obs   where u_R_proj = fx*(Xc[0]-b)/Zc + cx
+//
+// Jacobian rows 0-1 are identical to ReprojectionCost.
+// Row 2 (∂u_R/∂...):
+//   ∂u_R/∂X_c = [ fx/Zc, 0, -fx*(Xc[0]-b)/Zc² ]  (same form as left u but X→X-b)
+//   ∂u_R/∂ω   = ∂u_R/∂X_c · ∂X_c/∂ω   (same ∂X_c/∂ω as above)
+//   ∂u_R/∂t   = ∂u_R/∂X_c · I₃          (columns 3,4,5)
+//   ∂u_R/∂X_w = ∂u_R/∂X_c · R
+
+bool StereoReprojectionCost::operator()(
+    const double* const pose,
+    const double* const point,
+    double* residuals, double** jacobians) const
+{
+    double Xc[3];
+    ceres::AngleAxisRotatePoint(pose, point, Xc);
+    Xc[0] += pose[3];
+    Xc[1] += pose[4];
+    Xc[2] += pose[5];
+
+    const double inv_Zc  = 1.0 / Xc[2];
+    const double inv_Zc2 = inv_Zc * inv_Zc;
+
+    const double u_L_proj = fx * Xc[0] * inv_Zc + cx;
+    const double v_L_proj = fy * Xc[1] * inv_Zc + cy;
+    const double u_R_proj = fx * (Xc[0] - baseline) * inv_Zc + cx;
+
+    residuals[0] = u_L_proj - u_L_obs;
+    residuals[1] = v_L_proj - v_L_obs;
+    residuals[2] = u_R_proj - u_R_obs;
+
+    if (!jacobians) return true;
+
+    // Shared projection Jacobian terms
+    const double jp00 = fx * inv_Zc;
+    const double jp02 = -fx * Xc[0] * inv_Zc2;
+    const double jp11 = fy * inv_Zc;
+    const double jp12 = -fy * Xc[1] * inv_Zc2;
+    // Right u Jacobian w.r.t. X_c:  [ fx/Zc, 0, -fx*(Xc[0]-b)/Zc² ]
+    const double jr02 = -fx * (Xc[0] - baseline) * inv_Zc2;
+
+    const double dXc_dw[3][3] = {
+        {0.0, Xc[2], -Xc[1]}, {-Xc[2], 0.0, Xc[0]}, {Xc[1], -Xc[0], 0.0}};
+
+    if (jacobians[0]) {
+        double* j = jacobians[0];  // row-major 3×6
+        // Row 0 (∂u_L/∂pose) — same as ReprojectionCost
+        j[0]  = jp00 * dXc_dw[0][0] + jp02 * dXc_dw[2][0];
+        j[1]  = jp00 * dXc_dw[0][1] + jp02 * dXc_dw[2][1];
+        j[2]  = jp00 * dXc_dw[0][2] + jp02 * dXc_dw[2][2];
+        j[3]  = jp00;   j[4]  = 0.0;   j[5]  = jp02;
+        // Row 1 (∂v_L/∂pose)
+        j[6]  = jp11 * dXc_dw[1][0] + jp12 * dXc_dw[2][0];
+        j[7]  = jp11 * dXc_dw[1][1] + jp12 * dXc_dw[2][1];
+        j[8]  = jp11 * dXc_dw[1][2] + jp12 * dXc_dw[2][2];
+        j[9]  = 0.0;    j[10] = jp11;  j[11] = jp12;
+        // Row 2 (∂u_R/∂pose)  — same ∂X_c/∂ω; right proj uses jp00 (same fx/Zc) and jr02
+        j[12] = jp00 * dXc_dw[0][0] + jr02 * dXc_dw[2][0];
+        j[13] = jp00 * dXc_dw[0][1] + jr02 * dXc_dw[2][1];
+        j[14] = jp00 * dXc_dw[0][2] + jr02 * dXc_dw[2][2];
+        j[15] = jp00;   j[16] = 0.0;   j[17] = jr02;
+    }
+
+    if (jacobians[1]) {
+        double R[9];
+        ceres::AngleAxisToRotationMatrix(pose, R);
+        double* j = jacobians[1];  // row-major 3×3
+        // Row 0 (∂u_L/∂X_w)
+        j[0] = jp00 * R[0] + jp02 * R[6];
+        j[1] = jp00 * R[1] + jp02 * R[7];
+        j[2] = jp00 * R[2] + jp02 * R[8];
+        // Row 1 (∂v_L/∂X_w)
+        j[3] = jp11 * R[3] + jp12 * R[6];
+        j[4] = jp11 * R[4] + jp12 * R[7];
+        j[5] = jp11 * R[5] + jp12 * R[8];
+        // Row 2 (∂u_R/∂X_w)  — uses jr02 instead of jp02
+        j[6] = jp00 * R[0] + jr02 * R[6];
+        j[7] = jp00 * R[1] + jr02 * R[7];
+        j[8] = jp00 * R[2] + jr02 * R[8];
+    }
+
+    return true;
+}
+
+class AnalyticStereoReprojectionCostFunction
+    : public ceres::SizedCostFunction<StereoReprojectionCost::kNumResiduals,   // 3 residuals
+                                      StereoReprojectionCost::kNumPoseParams,  // 6 pose params
+                                      StereoReprojectionCost::kNumPointParams> // 3 point params
+{
+   public:
+    explicit AnalyticStereoReprojectionCostFunction(const StereoReprojectionCost& cost)
+        : cost_(cost) {}
+
+    bool Evaluate(double const* const* parameters, double* residuals,
+                  double** jacobians) const override {
+        return cost_(parameters[0], parameters[1], residuals, jacobians);
+    }
+
+   private:
+    StereoReprojectionCost cost_;
+};
+
+// ─── Pose Prior Cost (motion model smoothing) ─────────────────────────────────
+//
+// Soft anchor: penalises deviation of each non-anchor KF from its pre-BA
+// (PnP-estimated) pose.  Prevents BA from placing KFs at physically implausible
+// positions when the reprojection residual count is very low (sparse features,
+// dark turns, near-LOST states).
+// Weight 0.5 per residual component: only dominates when < ~10 reprojection
+// observations remain for a KF (50× weaker than 1px reprojection at full coverage).
+struct PosePriorCost {
+    double prior[6];
+    double w_r, w_t;
+
+    template <typename T>
+    bool operator()(const T* const pose, T* res) const {
+        for (int i = 0; i < 3; ++i) res[i]   = T(w_r) * (pose[i]   - T(prior[i]));
+        for (int i = 0; i < 3; ++i) res[i+3] = T(w_t) * (pose[i+3] - T(prior[i+3]));
+        return true;
+    }
+
+    static ceres::CostFunction* Create(const double* p, double w_r, double w_t) {
+        auto* c = new PosePriorCost;
+        std::copy(p, p + 6, c->prior);
+        c->w_r = w_r; c->w_t = w_t;
+        return new ceres::AutoDiffCostFunction<PosePriorCost, 6, 6>(c);
+    }
+};
+
+
 // ─── Pose ↔ Isometry3d conversion helpers ────────────────────────────────────
 
 /// Convert Eigen::Isometry3d → 6-DOF pose vector [ω, t]
@@ -231,9 +366,39 @@ void LocalBA::optimize() {
         point_params[id] = {mp->position.x(), mp->position.y(), mp->position.z()};
     }
 
+    // ── 3b. Record pre-BA poses for PosePriorCost (soft anchor) ──────────────
+    std::unordered_map<long, std::array<double, 6>> prior_poses;
+    for (auto& kf : window) {
+        prior_poses[kf->id] = {};
+        std::copy(pose_params[kf->id].begin(), pose_params[kf->id].end(),
+                  prior_poses[kf->id].begin());
+    }
+
     // ── 4. Build Ceres Problem ────────────────────────────────────────────────
+    //
+    // Turn-adaptive Huber kernel:
+    // During sharp turns, distant features have large apparent pixel velocity
+    // but noisy depth estimates — their reprojection residuals are inflated by
+    // the rotation and can corrupt the BA result.  A tighter Huber δ
+    // (smaller → transitions to linear sooner) downweights these outliers
+    // more aggressively while leaving genuine inliers (small residuals) alone.
+    //
+    // Threshold: 0.05 rad/KF ≈ 3°/KF — above normal straight driving but well
+    // below the sharp-turn regime (>0.1 rad/KF).
+    double effective_huber = cfg_.huber_delta;
+    if (window.size() >= 2) {
+        const auto& kf_last = window.back();
+        const auto& kf_prev = window[window.size() - 2];
+        Eigen::Isometry3d T_rel = kf_last->T_cw * kf_prev->T_cw.inverse();
+        double kf_angle = Eigen::AngleAxisd(T_rel.rotation()).angle();
+        if (kf_angle > 0.05) {
+            // Sharp turn: halve the Huber threshold to reject noisy distant features
+            effective_huber = cfg_.huber_delta * 0.5;
+        }
+    }
+
     ceres::Problem problem;
-    ceres::LossFunction* loss = new ceres::HuberLoss(cfg_.huber_delta);
+    ceres::LossFunction* loss = new ceres::HuberLoss(effective_huber);
 
     for (auto& kf : window) {
         double* pose = pose_params[kf->id].data();
@@ -248,12 +413,23 @@ void LocalBA::optimize() {
             double* pt = pit->second.data();
             const cv::Point2f& obs = kf->keypoints[kp_idx].pt;
 
-            ReprojectionCost cost(obs.x, obs.y, cam_.fx, cam_.fy, cam_.cx, cam_.cy);
-
-            problem.AddResidualBlock(new AnalyticReprojectionCostFunction(cost), loss, pose, pt);
+            // Use stereo cost (3 residuals) when a valid right-image observation exists.
+            if (cam_.is_stereo() &&
+                kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
+                StereoReprojectionCost cost(obs.x, obs.y, kf->uR[kp_idx],
+                                            cam_.fx, cam_.fy, cam_.cx, cam_.cy,
+                                            cam_.baseline);
+                problem.AddResidualBlock(
+                    new AnalyticStereoReprojectionCostFunction(cost), loss, pose, pt);
+            } else {
+                ReprojectionCost cost(obs.x, obs.y, cam_.fx, cam_.fy, cam_.cx, cam_.cy);
+                problem.AddResidualBlock(
+                    new AnalyticReprojectionCostFunction(cost), loss, pose, pt);
+            }
         }
 
         problem.AddParameterBlock(pose, 6);
+
     }
 
     // Add point parameter blocks
@@ -261,10 +437,24 @@ void LocalBA::optimize() {
         problem.AddParameterBlock(pt.data(), 3);
     }
 
-    // Fix oldest keyframe to remove gauge freedom (monocular SLAM)
+    // Fix oldest keyframe to remove gauge freedom (stereo SLAM)
     if (!window.empty()) {
         double* oldest_pose = pose_params[window.front()->id].data();
         problem.SetParameterBlockConstant(oldest_pose);
+    }
+
+    // ── 4b. Pose prior (motion model soft anchor) ────────────────────────────
+    // Soft anchor to the pre-BA PnP estimate for each non-anchor KF.
+    // Prevents BA from diverging to implausible positions when reprojection
+    // observations are very sparse (dark turns, near-LOST states).
+    // Jacobian is O(1) — numerically safe regardless of absolute pose magnitude.
+    for (auto& kf : window) {
+        if (kf == window.front()) continue;  // anchor is fixed — skip
+        auto it = prior_poses.find(kf->id);
+        if (it == prior_poses.end()) continue;
+        problem.AddResidualBlock(
+            PosePriorCost::Create(it->second.data(), 0.5, 0.5),
+            nullptr, pose_params[kf->id].data());
     }
 
     // ── 5. Solve ──────────────────────────────────────────────────────────────
@@ -291,6 +481,52 @@ void LocalBA::optimize() {
     for (auto& [id, mp] : active_points) {
         auto& pt = point_params[id];
         mp->position = Eigen::Vector3d(pt[0], pt[1], pt[2]);
+    }
+
+    // ── 8. Post-BA reprojection culling ───────────────────────────────────────
+    // Compute reprojection errors using the optimised poses and points still
+    // available in pose_params / point_params.  Mark any map point whose error
+    // exceeds 4 px in any window frame as bad.  This removes persistently noisy
+    // points (small-baseline triangulations, RANSAC survivors) and keeps the map
+    // clean for future tracking.
+    {
+        const double cull_thresh2 = 36.0;   // 6 px²
+        for (auto& kf : window) {
+            const double* pose = pose_params.at(kf->id).data();
+            for (int kp_idx = 0; kp_idx < (int)kf->keypoints.size(); ++kp_idx) {
+                auto& mp = kf->map_points[kp_idx];
+                if (!mp || mp->is_bad) continue;
+                auto pit = point_params.find(mp->id);
+                if (pit == point_params.end()) continue;
+                const double* pt = pit->second.data();
+
+                double Xc[3];
+                ceres::AngleAxisRotatePoint(pose, pt, Xc);
+                Xc[0] += pose[3]; Xc[1] += pose[4]; Xc[2] += pose[5];
+                if (Xc[2] <= 0.0) { mp->is_bad = true; continue; }
+
+                // Cull stereo points beyond 150m — depth unreliable at that range.
+                if (cam_.is_stereo() &&
+                    kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f &&
+                    Xc[2] > 150.0) {
+                    mp->is_bad = true; continue;
+                }
+
+                double u  = cam_.fx * Xc[0] / Xc[2] + cam_.cx;
+                double v  = cam_.fy * Xc[1] / Xc[2] + cam_.cy;
+                double du = u - kf->keypoints[kp_idx].pt.x;
+                double dv = v - kf->keypoints[kp_idx].pt.y;
+                if (du*du + dv*dv > cull_thresh2) { mp->is_bad = true; continue; }
+
+                // Stereo: also cull if right-camera reprojection exceeds threshold
+                if (cam_.is_stereo() &&
+                    kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
+                    double u_R  = cam_.fx * (Xc[0] - cam_.baseline) / Xc[2] + cam_.cx;
+                    double dur  = u_R - kf->uR[kp_idx];
+                    if (dur * dur > cull_thresh2) mp->is_bad = true;
+                }
+            }
+        }
     }
 
     // Cleanup map points flagged as bad by other threads

@@ -11,6 +11,7 @@
 #include "slam/map.hpp"
 #include "slam/tracker.hpp"
 #include "slam/local_ba.hpp"
+#include "slam/pose_graph.hpp"
 #include "slam/visualizer.hpp"
 
 #include <opencv2/imgcodecs.hpp>
@@ -34,7 +35,8 @@ namespace fs = std::filesystem;
 
 struct KittiSequence {
     std::string sequence_path;
-    std::vector<std::string> image_paths;
+    std::vector<std::string> image_paths;        // left  (image_0/)
+    std::vector<std::string> image_right_paths;  // right (image_1/); empty if not found
     std::vector<double>      timestamps;   // seconds
     slam::Camera             camera;
 
@@ -43,7 +45,7 @@ struct KittiSequence {
         KittiSequence seq;
         seq.sequence_path = seq_path;
 
-        // Camera calibration
+        // Camera calibration (also extracts stereo baseline from P1)
         seq.camera = slam::Camera::from_kitti_calib(seq_path + "/calib.txt");
 
         // Timestamps
@@ -53,7 +55,7 @@ struct KittiSequence {
         double t;
         while (tf >> t) seq.timestamps.push_back(t);
 
-        // Image paths (image_0/ for left grayscale)
+        // Left image paths (image_0/)
         fs::path img_dir = fs::path(seq_path) / "image_0";
         if (!fs::exists(img_dir))
             throw std::runtime_error("image_0/ not found in " + seq_path);
@@ -70,8 +72,40 @@ struct KittiSequence {
         if (seq.image_paths.empty())
             throw std::runtime_error("No .png images found in " + img_dir.string());
 
+        // Right image paths (image_1/) — optional; enables stereo mode
+        fs::path img_dir_r = fs::path(seq_path) / "image_1";
+        if (fs::exists(img_dir_r)) {
+            std::vector<fs::path> rpaths;
+            for (auto& entry : fs::directory_iterator(img_dir_r)) {
+                if (entry.path().extension() == ".png")
+                    rpaths.push_back(entry.path());
+            }
+            std::sort(rpaths.begin(), rpaths.end());
+            for (auto& p : rpaths)
+                seq.image_right_paths.push_back(p.string());
+        }
+
         std::cout << "[KITTI] Loaded " << seq.image_paths.size()
-                  << " frames from " << seq_path << "\n";
+                  << " frames from " << seq_path;
+        if (!seq.image_right_paths.empty())
+            std::cout << " (stereo, b=" << seq.camera.baseline << " m)";
+        std::cout << "\n";
+
+        // ── Calibration diagnostic ───────────────────────────────────────────
+        // Decomposed from P0 (intrinsics) and P1 (baseline = -P1[3]/fx).
+        // KITTI seq 00 expected: fx≈718.9, cy≈185.2, baseline≈0.537 m
+        std::cout << "[KITTI] Intrinsics: fx=" << seq.camera.fx
+                  << "  fy=" << seq.camera.fy
+                  << "  cx=" << seq.camera.cx
+                  << "  cy=" << seq.camera.cy << "\n";
+        if (seq.camera.is_stereo()) {
+            std::cout << "[KITTI] Stereo baseline: " << seq.camera.baseline << " m";
+            if (seq.camera.baseline < 0.3 || seq.camera.baseline > 0.8)
+                std::cout << "  *** WARNING: outside expected range [0.30, 0.80] m"
+                              " — verify calib.txt uses P0/P1 (grayscale), not P2/P3 (color)";
+            std::cout << "\n";
+        }
+
         return seq;
     }
 };
@@ -164,6 +198,7 @@ int main(int argc, char** argv)
     auto map        = slam::Map::create();
     auto tracker    = slam::Tracker::create(seq.camera, map);
     auto local_ba   = slam::LocalBA::create(seq.camera, map);
+    auto pose_graph = slam::PoseGraph::create(map, seq.camera);
     slam::Visualizer::Ptr viz;
 
     if (!args.no_viz) {
@@ -205,6 +240,11 @@ int main(int argc, char** argv)
         double ts = (i < (int)seq.timestamps.size()) ? seq.timestamps[i] : (double)i;
         auto frame = slam::Frame::create(img, ts, i);
 
+        // Attach right image for stereo mode
+        if (i < (int)seq.image_right_paths.size()) {
+            frame->image_right = cv::imread(seq.image_right_paths[i], cv::IMREAD_GRAYSCALE);
+        }
+
         auto t0 = std::chrono::high_resolution_clock::now();
 
         // Track
@@ -221,6 +261,19 @@ int main(int argc, char** argv)
         if (frame->is_keyframe && map->num_keyframes() >= 2) {
             local_ba->optimize();
             tracker->notify_ba_update();
+
+            // Register new KF with pose graph; run loop detection + PGO every 5 KFs.
+            pose_graph->add_keyframe(frame);
+            if (map->num_keyframes() % 5 == 0) {
+                // Co-visibility detection (fast, catches near-revisits)
+                pose_graph->detect_and_add_loops();
+                // Appearance-based detection (works for long-range loop closures)
+                pose_graph->detect_and_add_loops_visual(frame);
+                if (pose_graph->has_new_loops()) {
+                    pose_graph->optimize();
+                    tracker->notify_ba_update();
+                }
+            }
         }
 
         auto t2 = std::chrono::high_resolution_clock::now();

@@ -70,3 +70,42 @@ void cuda_match_hamming_ratio(
     int*           h_best_idx,
     int*           h_best_dist
 );
+
+/// @brief  Stereo epipolar matching with GPU Hamming distance + Lowe ratio test.
+///
+/// For rectified stereo pairs, epipolar lines are horizontal.  This matcher
+/// restricts each query (left) descriptor to only consider train (right)
+/// descriptors whose keypoint satisfies:
+///   |y_query[q] - y_train[t]| <= epi_tol        (epipolar band)
+///   d_min <= x_query[q] - x_train[t] <= d_max   (valid disparity range)
+///
+/// @param h_query    Host left  descriptors (N_q x 32 bytes)
+/// @param h_train    Host right descriptors (N_t x 32 bytes)
+/// @param N_q        Number of left  descriptors
+/// @param N_t        Number of right descriptors
+/// @param h_y_query  Left  keypoint y-coords [N_q]
+/// @param h_y_train  Right keypoint y-coords [N_t]
+/// @param h_x_query  Left  keypoint x-coords [N_q]
+/// @param h_x_train  Right keypoint x-coords [N_t]
+/// @param epi_tol    Max row difference in pixels (typically 2.0)
+/// @param d_min      Minimum disparity in pixels (e.g. 5.0)
+/// @param d_max      Maximum disparity in pixels (e.g. 300.0)
+/// @param ratio      Lowe ratio threshold (0.75 is standard)
+/// @param h_best_idx  Output: matched right index (-1 if rejected)
+/// @param h_best_dist Output: Hamming distance to best match
+void cuda_match_stereo_epipolar(
+    const uint8_t* h_query,
+    const uint8_t* h_train,
+    int            N_q,
+    int            N_t,
+    const float*   h_y_query,
+    const float*   h_y_train,
+    const float*   h_x_query,
+    const float*   h_x_train,
+    float          epi_tol,
+    float          d_min,
+    float          d_max,
+    float          ratio,
+    int*           h_best_idx,
+    int*           h_best_dist
+);

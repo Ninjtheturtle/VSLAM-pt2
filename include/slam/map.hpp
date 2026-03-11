@@ -18,7 +18,7 @@ namespace slam {
 ///   • A sliding window of the N most recent keyframes for local BA
 class Map {
 public:
-    static constexpr int kWindowSize = 10;  // sliding window for local BA
+    static constexpr int kWindowSize = 30;  // sliding window for local BA
 
     using Ptr = std::shared_ptr<Map>;
     static Ptr create() { return Ptr(new Map()); }
@@ -48,6 +48,18 @@ public:
     /// Remove map points flagged as bad
     void cleanup_bad_map_points();
 
+    /// Clear all keyframes and map points (call before re-initialization).
+    /// Automatically archives current keyframes into trajectory_archive_ first.
+    void reset();
+
+    /// Keyframes archived from all previous map resets — for trajectory visualization only.
+    /// Never included in BA or the tracking descriptor pool.
+    std::vector<Frame::Ptr> trajectory_archive() const;
+
+    /// Count map points observed by both kf_id_a and kf_id_b (via observations map).
+    /// Used by PoseGraph to detect co-visibility loop candidates.
+    int count_shared_map_points(long kf_id_a, long kf_id_b) const;
+
     // ── Statistics ───────────────────────────────────────────────────────────
     size_t num_keyframes()  const;
     size_t num_map_points() const;
@@ -62,6 +74,9 @@ private:
     std::deque<Frame::Ptr>                         keyframe_order_;
     std::unordered_map<long, Frame::Ptr>            keyframes_;
     std::unordered_map<long, MapPoint::Ptr>         map_points_;
+
+    // Trajectory archive — NOT cleared by reset(); accumulates KFs from all prior segments.
+    std::vector<Frame::Ptr> trajectory_archive_;
 };
 
 }  // namespace slam

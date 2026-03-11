@@ -3,12 +3,16 @@
 // Rerun.io C++ SDK logging for SLAM state.
 //
 // Rerun entity hierarchy:
-//   world/camera/
-//     image                    — Pinhole + Transform3D + Image frames (creates 3D view + 2D panel)
-//     image/keypoints          — Points2D overlaid on image panel
-//     trajectory               — LineStrips3D (SLAM camera path, BA-refined)
-//     ground_truth/trajectory  — LineStrips3D (GT, static orange)
-//     map/points               — Points3D (active map point cloud)
+//   world/                       — ViewCoordinates::RDF (3D view root)
+//   world/camera/image           — Pinhole + Transform3D + Image (camera frustum + 2D panel)
+//   world/camera/image/keypoints — Points2D overlaid on image panel
+//   world/trajectory             — LineStrips3D (SLAM camera path, BA-refined)
+//   world/ground_truth/trajectory— LineStrips3D (GT, static orange)
+//   world/map/points             — Points3D (active map point cloud)
+//
+// 3D geometry (trajectory, GT, map) must be direct children of "world", not under
+// "world/camera", so Rerun creates a 3D spatial view at "world" rather than a 2D
+// camera view at "world/camera".
 
 #include "slam/visualizer.hpp"
 
@@ -21,6 +25,7 @@
 #include <rerun/archetypes/transform3d.hpp>
 #include <rerun/archetypes/view_coordinates.hpp>
 #include <rerun/components/color.hpp>
+#include <rerun/blueprint/archetypes/viewport_blueprint.hpp>
 
 #include <opencv2/imgproc.hpp>
 
@@ -48,10 +53,29 @@ Visualizer::Ptr Visualizer::create(const Config& cfg)
         std::cout << "[Visualizer] Connected to Rerun at " << cfg.addr << "\n";
     }
 
-    // Tell Rerun that the camera space uses RDF convention: x=Right, y=Down, z=Forward.
-    // Logging to world/camera (the 3D view root auto-created by Rerun for the Pinhole)
-    // so the coordinate axes are correct in the 3D panel.
-    v->rec_->log_static("world/camera", rerun::archetypes::ViewCoordinates::RDF);
+    // Blueprint stream: reset viewport on every connect so cached blueprints never block
+    // the 3D view.  Clears past_viewer_recommendations (the list of views Rerun already
+    // auto-created) so auto_views=true will re-create all recommended views fresh.
+    {
+        rerun::RecordingStream bp(cfg.app_id, "", rerun::StoreKind::Blueprint);
+        bp.connect_tcp(cfg.addr);
+        bp.log_static("viewport",
+            rerun::blueprint::archetypes::ViewportBlueprint()
+                .with_auto_layout(true)
+                .with_auto_views(true)
+                .with_past_viewer_recommendations({}));
+    }
+
+    // Set world-space coordinate convention: x=Right, y=Down, z=Forward (RDF = KITTI camera).
+    // Must be at "world" (the 3D view root), not at "world/camera", otherwise Rerun
+    // roots a 2D view at the camera entity instead of a 3D view at world.
+    v->rec_->log_static("world", rerun::archetypes::ViewCoordinates::RDF);
+
+    // Anchor: guarantees Rerun auto-creates a 3D spatial view at "world" from startup,
+    // even before any trajectory or map data arrives and regardless of GT file presence.
+    v->rec_->log_static("world/origin",
+        rerun::archetypes::Points3D({{0.0f, 0.0f, 0.0f}})
+            .with_radii(std::vector<float>{0.001f}));
 
     return v;
 }
@@ -150,16 +174,19 @@ void Visualizer::log_trajectory(const Map::Ptr& map,
     if (!rec_) return;
     rec_->set_time_seconds("time", ts);
 
-    auto kfs = map->all_keyframes();   // oldest-first, per Map::all_keyframes() contract
+    // Draw from archived keyframes (before resets) + current active keyframes.
+    // trajectory_archive_ is preserved across map_->reset() calls so the trajectory
+    // never disappears when LOST triggers a map wipe.
+    auto archived = map->trajectory_archive();   // KFs from all prior map segments
+    auto kfs      = map->all_keyframes();         // current active KFs
 
     constexpr double kGapSq = 50.0 * 50.0;  // 50 m gap → new strip segment
 
-    // Build segments from keyframe camera centres (BA-refined).
     std::vector<std::vector<rerun::datatypes::Vec3D>> segments;
     Eigen::Vector3d last_c;
     bool has_last = false;
 
-    for (auto& kf : kfs) {
+    auto add_kf_pos = [&](const Frame::Ptr& kf) {
         Eigen::Vector3d c = kf->camera_center();
         if (!has_last || (c - last_c).squaredNorm() > kGapSq) {
             segments.emplace_back();
@@ -167,7 +194,10 @@ void Visualizer::log_trajectory(const Map::Ptr& map,
         segments.back().push_back({(float)c.x(), (float)c.y(), (float)c.z()});
         last_c   = c;
         has_last = true;
-    }
+    };
+
+    for (auto& kf : archived) add_kf_pos(kf);
+    for (auto& kf : kfs)      add_kf_pos(kf);
 
     // Append the current live frame (PnP estimate) if it is tracked but not
     // yet promoted to a keyframe — avoids duplicating the just-inserted KF.
@@ -187,7 +217,7 @@ void Visualizer::log_trajectory(const Map::Ptr& map,
     for (auto& seg : segments)
         strips.emplace_back(seg);
 
-    rec_->log("world/camera/trajectory",
+    rec_->log("world/trajectory",
         rerun::archetypes::LineStrips3D(strips)
             .with_colors({rerun::components::Color(0, 255, 128)})   // bright green
             .with_radii(std::vector<float>(strips.size(), 0.5f)));
@@ -211,7 +241,7 @@ void Visualizer::log_map(const Map::Ptr& map, double timestamp)
         positions.push_back({(float)p.x(), (float)p.y(), (float)p.z()});
     }
 
-    rec_->log("world/camera/map/points",
+    rec_->log("world/map/points",
         rerun::archetypes::Points3D(positions)
             .with_radii(std::vector<float>(positions.size(), 0.03f))
     );
@@ -228,7 +258,7 @@ void Visualizer::log_ground_truth(const std::vector<std::array<float, 3>>& cente
     for (auto& c : centers)
         pts.push_back({c[0], c[1], c[2]});
 
-    rec_->log_static("world/camera/ground_truth/trajectory",
+    rec_->log_static("world/ground_truth/trajectory",
         rerun::archetypes::LineStrips3D(
             {rerun::components::LineStrip3D(pts)})
             .with_colors({rerun::components::Color(255, 165, 0)})  // orange

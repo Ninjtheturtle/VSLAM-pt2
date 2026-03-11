@@ -94,6 +94,39 @@ void Map::cleanup_bad_map_points()
     }
 }
 
+void Map::reset()
+{
+    {
+        std::lock_guard<std::mutex> lk(kf_mutex_);
+        // Archive current keyframes before wiping so log_trajectory() can still draw them.
+        for (auto& kf : keyframe_order_)
+            trajectory_archive_.push_back(kf);
+        keyframe_order_.clear();
+        keyframes_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(mp_mutex_);
+        map_points_.clear();
+    }
+}
+
+std::vector<Frame::Ptr> Map::trajectory_archive() const {
+    return trajectory_archive_;
+}
+
+int Map::count_shared_map_points(long kf_id_a, long kf_id_b) const
+{
+    std::lock_guard<std::mutex> lock(mp_mutex_);
+    int count = 0;
+    for (auto& [id, mp] : map_points_) {
+        if (mp->is_bad) continue;
+        std::lock_guard<std::mutex> obs_lock(mp->obs_mutex);
+        if (mp->observations.count(kf_id_a) && mp->observations.count(kf_id_b))
+            ++count;
+    }
+    return count;
+}
+
 size_t Map::num_keyframes() const
 {
     std::lock_guard<std::mutex> lock(kf_mutex_);

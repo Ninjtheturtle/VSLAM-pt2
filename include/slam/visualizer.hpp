@@ -27,7 +27,7 @@ namespace slam {
 class Visualizer {
 public:
     struct Config {
-        std::string app_id   = "vslam";
+        std::string app_id   = "vslam2";
         std::string addr     = "127.0.0.1:9876";
         bool log_image       = true;
         bool log_keypoints   = true;

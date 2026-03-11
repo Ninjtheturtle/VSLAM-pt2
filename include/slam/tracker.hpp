@@ -35,8 +35,9 @@ public:
         int   pnp_iterations     = 200;
         float pnp_reprojection   = 5.5f; // pixels (RANSAC threshold)
         int   pnp_min_inliers    = 15;   // minimum PnP inliers to accept pose
-        float init_min_disparity = 5.0f;  // min mean 2D disparity (px) before init attempt
-        float init_median_depth  = 20.0f; // target median map-point depth after init (m)
+        float stereo_epi_tol  = 2.0f;   // stereo epipolar row tolerance (pixels)
+        float stereo_d_min    = 2.0f;   // minimum stereo disparity (pixels; ~193 m max depth for KITTI)
+        float stereo_d_max    = 300.0f; // maximum stereo disparity (pixels; ~0.35 m depth)
     };
 
     using Ptr = std::shared_ptr<Tracker>;
@@ -76,9 +77,18 @@ private:
     int triangulate_and_add(Frame::Ptr ref, Frame::Ptr cur,
                             const std::vector<cv::DMatch>& matches);
 
+    /// GPU stereo epipolar matching: fills frame->uR with right x-coords.
+    void match_stereo(Frame::Ptr frame);
+
+    /// Triangulate metric map points from a single stereo frame (frame->uR must be set).
+    int triangulate_stereo(Frame::Ptr frame);
+
     /// Attempt to recover pose against the full global map when LOST.
     /// Returns true if >= pnp_min_inliers*3 PnP inliers found.
     bool try_relocalize(Frame::Ptr frame);
+
+    /// Median angular parallax (radians) of tracked map points between frame and ref_kf.
+    double compute_median_parallax(Frame::Ptr frame, Frame::Ptr ref_kf) const;
 
     Camera         cam_;
     Map::Ptr       map_;
@@ -98,6 +108,9 @@ private:
     // Constant velocity motion model
     Eigen::Isometry3d velocity_ = Eigen::Isometry3d::Identity();
     bool velocity_valid_ = false;
+
+    // Consecutive tracking-failure count; only go LOST after ≥3 failures (coasting)
+    int lost_streak_ = 0;
 };
 
 }  // namespace slam

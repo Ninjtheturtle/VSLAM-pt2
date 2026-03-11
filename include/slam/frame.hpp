@@ -30,9 +30,17 @@ public:
     double timestamp;           // seconds
     cv::Mat image_gray;         // grayscale, 8U
 
-    // Features
+    // Features — left image
     std::vector<cv::KeyPoint> keypoints;
     cv::Mat                   descriptors;  // N × 32, CV_8U (ORB)
+
+    // Features — right image (stereo; empty if monocular)
+    cv::Mat                   image_right;
+    std::vector<cv::KeyPoint> keypoints_right;
+    cv::Mat                   descriptors_right;
+
+    // Right x-coordinate per left keypoint (-1.0f = no stereo match)
+    std::vector<float> uR;
 
     // Map associations (one per keypoint; nullptr = unmatched)
     std::vector<std::shared_ptr<MapPoint>> map_points;

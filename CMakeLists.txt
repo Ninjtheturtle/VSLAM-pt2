@@ -94,6 +94,7 @@ add_executable(vslam
   src/map.cpp
   src/tracker.cpp
   src/local_ba.cpp
+  src/pose_graph.cpp
   src/visualizer.cpp
 )
 target_include_directories(vslam PRIVATE

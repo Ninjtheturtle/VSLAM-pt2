@@ -20,7 +20,7 @@ namespace slam {
 class LocalBA {
 public:
     struct Config {
-        int   max_iterations     = 30;
+        int   max_iterations     = 60;
         int   window_size        = Map::kWindowSize;
         double huber_delta       = 1.0;   // pixels
         bool   verbose           = false;
@@ -68,6 +68,37 @@ struct ReprojectionCost {
     static constexpr int kNumResiduals    = 2;
     static constexpr int kNumPoseParams   = 6;
     static constexpr int kNumPointParams  = 3;
+};
+
+// ─── Stereo Analytical Jacobian Cost Function ─────────────────────────────────
+//
+// Adds a third residual for the right camera reprojection:
+//   u_R = fx * (X_c - baseline) / Z_c + cx
+//
+// residuals[2] = u_R_proj - u_R_obs
+//
+// The right camera shares the same intrinsics K and is translated by
+// [-baseline, 0, 0] in the left camera frame (rectified stereo).
+
+struct StereoReprojectionCost {
+    double u_L_obs, v_L_obs, u_R_obs;
+    double fx, fy, cx, cy, baseline;
+
+    StereoReprojectionCost(double uL, double vL, double uR,
+                           double fx_, double fy_, double cx_, double cy_,
+                           double b)
+        : u_L_obs(uL), v_L_obs(vL), u_R_obs(uR),
+          fx(fx_), fy(fy_), cx(cx_), cy(cy_), baseline(b) {}
+
+    // residuals[3] = [u_L - u_L_obs, v_L - v_L_obs, u_R - u_R_obs]
+    bool operator()(const double* const pose,
+                    const double* const point,
+                    double* residuals,
+                    double** jacobians) const;
+
+    static constexpr int kNumResiduals   = 3;
+    static constexpr int kNumPoseParams  = 6;
+    static constexpr int kNumPointParams = 3;
 };
 
 }  // namespace slam
