@@ -1,4 +1,6 @@
-// VSLAM entry point. usage: vslam.exe --sequence <path/to/kitti/sequence/XX> [--start N] [--end N] [--no-viz]
+// VSLAM entry point.
+// usage: vslam.exe --sequence <path/to/kitti/sequence/XX> [--start N] [--end N]
+//                  [--no-viz] [--hybrid] [--xfeat <engine>] [--lg <engine>]
 
 #include "slam/camera.hpp"
 #include "slam/frame.hpp"
@@ -7,6 +9,14 @@
 #include "slam/local_ba.hpp"
 #include "slam/pose_graph.hpp"
 #include "slam/visualizer.hpp"
+
+// Deep frontend (only compiled when ENABLE_DEEP_FRONTEND is defined in CMake)
+#ifdef ENABLE_DEEP_FRONTEND
+#include "deep/xfeat_extractor.hpp"
+#include "deep/lighterglue_async.hpp"
+#include "deep/ttt_autoencoder.hpp"
+#include "deep/semi_dense_disparity.hpp"
+#endif
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
@@ -106,9 +116,12 @@ struct KittiSequence {
 
 struct Args {
     std::string sequence_path;
-    int start_idx  = 0;
-    int end_idx    = -1;   // -1 = all frames
-    bool no_viz    = false;
+    int  start_idx        = 0;
+    int  end_idx          = -1;   // -1 = all frames
+    bool no_viz           = false;
+    bool hybrid           = false; // enable deep frontend (requires ENABLE_DEEP_FRONTEND)
+    std::string xfeat_engine;      // path to XFeat TRT engine
+    std::string lg_engine;         // path to LighterGlue TRT engine
 };
 
 Args parse_args(int argc, char** argv)
@@ -124,6 +137,12 @@ Args parse_args(int argc, char** argv)
             args.end_idx = std::stoi(argv[++i]);
         } else if (a == "--no-viz") {
             args.no_viz = true;
+        } else if (a == "--hybrid") {
+            args.hybrid = true;
+        } else if (a == "--xfeat" && i + 1 < argc) {
+            args.xfeat_engine = argv[++i];
+        } else if (a == "--lg" && i + 1 < argc) {
+            args.lg_engine = argv[++i];
         } else if (a == "--help" || a == "-h") {
             std::cout << "Usage: vslam.exe --sequence <path> [--start N] [--end N] [--no-viz]\n";
             exit(0);
@@ -184,24 +203,49 @@ int main(int argc, char** argv)
 
     // build SLAM system
     auto map        = slam::Map::create();
-    auto tracker    = slam::Tracker::create(seq.camera, map);
     auto local_ba   = slam::LocalBA::create(seq.camera, map);
     auto pose_graph = slam::PoseGraph::create(map, seq.camera);
     slam::Visualizer::Ptr viz;
 
-    if (!args.no_viz) {
-        viz = slam::Visualizer::create();  // default: log_image=true, log_keypoints=true
-        viz->log_pinhole(seq.camera);      // tells Rerun to show camera frustum + image panel
+    // --- Deep frontend (hybrid mode) ---
+    slam::Tracker::Ptr tracker;
 
-        // overlay GT trajectory (orange) if poses file is available
+#ifdef ENABLE_DEEP_FRONTEND
+    if (args.hybrid) {
+        std::string xfeat_path = args.xfeat_engine.empty()
+            ? "models/xfeat_fp16.engine" : args.xfeat_engine;
+        std::string lg_path = args.lg_engine.empty()
+            ? "models/lighterglue_fp16.engine" : args.lg_engine;
+
+        deep::XFeatExtractor::Config xfeat_cfg;
+        xfeat_cfg.engine_path  = xfeat_path;
+        xfeat_cfg.img_width    = seq.camera.width;
+        xfeat_cfg.img_height   = seq.camera.height;
+        auto xfeat = deep::XFeatExtractor::create(xfeat_cfg);
+
+        deep::LighterGlueAsync::Config lg_cfg;
+        lg_cfg.engine_path = lg_path;
+        auto lg = deep::LighterGlueAsync::create(lg_cfg);
+
+        deep::TTTLoopDetector::Config ttt_cfg;
+        auto ttt = deep::TTTLoopDetector::create(ttt_cfg);
+
+        tracker = slam::Tracker::create_hybrid(
+            seq.camera, map, std::move(xfeat), std::move(lg), std::move(ttt));
+        std::cout << "[VSLAM] Hybrid deep-geometric mode enabled\n";
+    } else
+#endif
+    {
+        tracker = slam::Tracker::create(seq.camera, map);
+    }
+    if (!args.no_viz) {
+        viz = slam::Visualizer::create();
+        viz->log_pinhole(seq.camera);
+
         std::string gt_path = derive_gt_path(args.sequence_path);
         auto gt_centers = load_gt_centers(gt_path);
         if (!gt_centers.empty()) {
             viz->log_ground_truth(gt_centers);
-            std::cout << "[VSLAM] GT overlay: " << gt_centers.size()
-                      << " poses from " << gt_path << "\n";
-        } else {
-            std::cout << "[VSLAM] No GT file at " << gt_path << " — skipping overlay\n";
         }
     }
 
@@ -209,9 +253,6 @@ int main(int argc, char** argv)
     int n_frames  = static_cast<int>(seq.image_paths.size());
     int start_idx = std::max(0, args.start_idx);
     int end_idx   = (args.end_idx < 0) ? n_frames : std::min(args.end_idx, n_frames);
-
-    std::cout << "[VSLAM] Processing frames " << start_idx
-              << " to " << end_idx - 1 << "\n";
 
     // main tracking loop
     long frame_count = 0;
@@ -269,15 +310,37 @@ int main(int argc, char** argv)
         if (viz) {
             viz->log_frame(frame);
             viz->log_trajectory(map, frame, ts);
-            if (frame->is_keyframe)
+            if (frame->is_keyframe) {
                 viz->log_map(map, ts);
+
+#ifdef ENABLE_DEEP_FRONTEND
+                // Semi-dense disparity (hybrid mode, stereo KFs only)
+                if (args.hybrid && !frame->feat_map_left.empty()
+                                && !frame->feat_map_right.empty()) {
+                    deep::SemiDenseDisparity::Config sd_cfg;
+                    sd_cfg.baseline  = (float)seq.camera.baseline;
+                    sd_cfg.fx        = (float)seq.camera.fx;
+                    sd_cfg.cx        = (float)seq.camera.cx;
+                    sd_cfg.cy        = (float)seq.camera.cy;
+                    static deep::SemiDenseDisparity semi_dense(sd_cfg);
+
+                    auto sd_pts = semi_dense.compute(
+                        frame->feat_map_left, frame->feat_map_right, frame->T_wc());
+                    viz->log_semi_dense(sd_pts, ts);
+
+                    // Release feature maps to free memory after use
+                    frame->feat_map_left.release();
+                    frame->feat_map_right.release();
+                }
+#endif
+            }
         }
 
         ++frame_count;
 
         // per-frame status
         Eigen::Vector3d pos = frame->camera_center();
-        printf("[%05d] track=%.1fms ba=%.1fms tracked=%3d kf=%zu pts=%zu "
+        fprintf(stderr, "[%05d] track=%.1fms ba=%.1fms tracked=%3d kf=%zu pts=%zu "
                "pos=(%.2f,%.2f,%.2f) %s\n",
                i, track_ms, ba_ms,
                frame->num_tracked(),

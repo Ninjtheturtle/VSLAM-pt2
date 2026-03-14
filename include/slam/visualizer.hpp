@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+// Forward-declare deep types to avoid pulling deep headers into every TU
+namespace deep { struct SemiDensePoint3D; }
+
 // forward-declare Rerun types to avoid including the full SDK in every TU
 namespace rerun { class RecordingStream; }
 
@@ -47,6 +50,10 @@ public:
     /// overlay GT camera centres as a static orange trajectory.
     /// call once before the main loop with poses from data/poses/XX.txt (KITTI format).
     void log_ground_truth(const std::vector<std::array<float, 3>>& centers);
+
+    /// log semi-dense point cloud from SemiDenseDisparity (visualization only).
+    /// entity path: world/map/semi_dense  — NOT inserted into Map or Ceres.
+    void log_semi_dense(const std::vector<deep::SemiDensePoint3D>& pts, double ts);
 
 private:
     Visualizer() = default;

@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <cuda_fp16.h>  // __half — for XFeat descriptor pointer type
 
 namespace slam {
 
@@ -29,7 +30,8 @@ public:
 
     // Features — left image
     std::vector<cv::KeyPoint> keypoints;
-    cv::Mat                   descriptors;  // N × 32, CV_8U (ORB)
+    cv::Mat                   descriptors;  // N × 32, CV_8U (ORB) — kept for PnP geometry;
+                                            // replaced by xfeat_descriptors in hybrid mode
 
     // Features — right image (stereo; empty if monocular)
     cv::Mat                   image_right;
@@ -47,6 +49,25 @@ public:
 
     // Whether this frame is promoted to a keyframe
     bool is_keyframe = false;
+
+    // -----------------------------------------------------------------------
+    // Deep-frontend fields (hybrid XFeat mode)
+    // -----------------------------------------------------------------------
+
+    // XFeat FP32 descriptors (promoted from FP16 for Ceres compatibility).
+    // Layout: N × 64, CV_32F.  Populated by HybridTracker::extract_features().
+    cv::Mat xfeat_descriptors;
+
+    // Per-keypoint confidence weight ∈ [0.1, 1.0].
+    // Source: L2 ratio pseudo-confidence (temporal) or LighterGlue probability (reloc).
+    // Consumed by ConfidenceWeightedReprojectionCost in local_ba.cpp.
+    std::vector<float> match_confidence;
+
+    // XFeat feature maps at 1/8 resolution (CHW float32, host memory).
+    // Populated on keyframes only for semi-dense disparity; released after use.
+    // Shape stored as [kXFeatFeatMapC * (H/8) rows × (W/8) cols].
+    cv::Mat feat_map_left;
+    cv::Mat feat_map_right;
 
     // helpers
     /// camera-to-world transform (inverse of T_cw)

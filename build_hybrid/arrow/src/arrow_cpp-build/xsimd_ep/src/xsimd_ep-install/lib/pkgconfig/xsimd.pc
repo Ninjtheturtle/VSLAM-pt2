@@ -1,0 +1,8 @@
+prefix=C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/xsimd_ep/src/xsimd_ep-install
+libdir=C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/xsimd_ep/src/xsimd_ep-install/lib
+includedir=C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/xsimd_ep/src/xsimd_ep-install/include
+
+Name: xsimd
+Description: xsimd provides a unified means for using SIMD features for library authors..
+Version: 13.0.0
+Cflags: -I${includedir}

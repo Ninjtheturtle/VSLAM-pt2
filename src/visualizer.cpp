@@ -1,6 +1,7 @@
 // Rerun.io logging for SLAM state. 3D entities live under "world/", not "world/camera/".
 
 #include "slam/visualizer.hpp"
+#include "deep/semi_dense_disparity.hpp"  // deep::SemiDensePoint3D
 
 #include <rerun.hpp>
 #include <rerun/archetypes/image.hpp>
@@ -226,6 +227,28 @@ void Visualizer::log_ground_truth(const std::vector<std::array<float, 3>>& cente
             {rerun::components::LineStrip3D(pts)})
             .with_colors({rerun::components::Color(255, 165, 0)})  // orange
             .with_radii({0.5f}));
+}
+
+// log_semi_dense — visualization-only semi-dense point cloud
+// Entity: world/map/semi_dense  (light blue)
+// ISOLATION: nothing from this function enters the Map or Ceres problem.
+
+void Visualizer::log_semi_dense(
+    const std::vector<deep::SemiDensePoint3D>& pts, double ts)
+{
+    if (!rec_ || pts.empty()) return;
+
+    rec_->set_time_seconds("time", ts);
+
+    std::vector<rerun::datatypes::Vec3D> positions;
+    positions.reserve(pts.size());
+    for (auto& p : pts)
+        positions.push_back({p.x, p.y, p.z});
+
+    rec_->log("world/map/semi_dense",
+        rerun::archetypes::Points3D(positions)
+            .with_radii({0.01f})
+            .with_colors({rerun::components::Color(100, 200, 255)}));
 }
 
 }  // namespace slam

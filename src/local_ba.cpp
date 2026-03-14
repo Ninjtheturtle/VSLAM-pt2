@@ -113,18 +113,15 @@ class AnalyticReprojectionCostFunction
 
 // stereo reprojection cost — 3 residuals: [u_L, v_L, u_R]. row 2 uses the right-camera projection.
 
-bool StereoReprojectionCost::operator()(
-    const double* const pose,
-    const double* const point,
-    double* residuals, double** jacobians) const
-{
+bool StereoReprojectionCost::operator()(const double* const pose, const double* const point,
+                                        double* residuals, double** jacobians) const {
     double Xc[3];
     ceres::AngleAxisRotatePoint(pose, point, Xc);
     Xc[0] += pose[3];
     Xc[1] += pose[4];
     Xc[2] += pose[5];
 
-    const double inv_Zc  = 1.0 / Xc[2];
+    const double inv_Zc = 1.0 / Xc[2];
     const double inv_Zc2 = inv_Zc * inv_Zc;
 
     const double u_L_proj = fx * Xc[0] * inv_Zc + cx;
@@ -145,26 +142,31 @@ bool StereoReprojectionCost::operator()(
     // right-camera u Jacobian: [ fx/Zc, 0, -fx*(Xc[0]-b)/Zc² ]
     const double jr02 = -fx * (Xc[0] - baseline) * inv_Zc2;
 
-    const double dXc_dw[3][3] = {
-        {0.0, Xc[2], -Xc[1]}, {-Xc[2], 0.0, Xc[0]}, {Xc[1], -Xc[0], 0.0}};
+    const double dXc_dw[3][3] = {{0.0, Xc[2], -Xc[1]}, {-Xc[2], 0.0, Xc[0]}, {Xc[1], -Xc[0], 0.0}};
 
     if (jacobians[0]) {
         double* j = jacobians[0];  // row-major 3×6
         // row 0 (∂u_L/∂pose) — same as monocular
-        j[0]  = jp00 * dXc_dw[0][0] + jp02 * dXc_dw[2][0];
-        j[1]  = jp00 * dXc_dw[0][1] + jp02 * dXc_dw[2][1];
-        j[2]  = jp00 * dXc_dw[0][2] + jp02 * dXc_dw[2][2];
-        j[3]  = jp00;   j[4]  = 0.0;   j[5]  = jp02;
+        j[0] = jp00 * dXc_dw[0][0] + jp02 * dXc_dw[2][0];
+        j[1] = jp00 * dXc_dw[0][1] + jp02 * dXc_dw[2][1];
+        j[2] = jp00 * dXc_dw[0][2] + jp02 * dXc_dw[2][2];
+        j[3] = jp00;
+        j[4] = 0.0;
+        j[5] = jp02;
         // row 1 (∂v_L/∂pose)
-        j[6]  = jp11 * dXc_dw[1][0] + jp12 * dXc_dw[2][0];
-        j[7]  = jp11 * dXc_dw[1][1] + jp12 * dXc_dw[2][1];
-        j[8]  = jp11 * dXc_dw[1][2] + jp12 * dXc_dw[2][2];
-        j[9]  = 0.0;    j[10] = jp11;  j[11] = jp12;
+        j[6] = jp11 * dXc_dw[1][0] + jp12 * dXc_dw[2][0];
+        j[7] = jp11 * dXc_dw[1][1] + jp12 * dXc_dw[2][1];
+        j[8] = jp11 * dXc_dw[1][2] + jp12 * dXc_dw[2][2];
+        j[9] = 0.0;
+        j[10] = jp11;
+        j[11] = jp12;
         // row 2 (∂u_R/∂pose) — same ∂X_c/∂ω, but right-camera proj uses jr02
         j[12] = jp00 * dXc_dw[0][0] + jr02 * dXc_dw[2][0];
         j[13] = jp00 * dXc_dw[0][1] + jr02 * dXc_dw[2][1];
         j[14] = jp00 * dXc_dw[0][2] + jr02 * dXc_dw[2][2];
-        j[15] = jp00;   j[16] = 0.0;   j[17] = jr02;
+        j[15] = jp00;
+        j[16] = 0.0;
+        j[17] = jr02;
     }
 
     if (jacobians[1]) {
@@ -189,9 +191,9 @@ bool StereoReprojectionCost::operator()(
 }
 
 class AnalyticStereoReprojectionCostFunction
-    : public ceres::SizedCostFunction<StereoReprojectionCost::kNumResiduals,   // 3 residuals
-                                      StereoReprojectionCost::kNumPoseParams,  // 6 pose params
-                                      StereoReprojectionCost::kNumPointParams> // 3 point params
+    : public ceres::SizedCostFunction<StereoReprojectionCost::kNumResiduals,    // 3 residuals
+                                      StereoReprojectionCost::kNumPoseParams,   // 6 pose params
+                                      StereoReprojectionCost::kNumPointParams>  // 3 point params
 {
    public:
     explicit AnalyticStereoReprojectionCostFunction(const StereoReprojectionCost& cost)
@@ -206,20 +208,183 @@ class AnalyticStereoReprojectionCostFunction
     StereoReprojectionCost cost_;
 };
 
-// pitch/roll soft constraint — penalizes R[3] and R[5] (zero when level). no height ref so no drift.
+// confidence-weighted monocular cost — identical to ReprojectionCost but residuals/Jacobians
+// are premultiplied by sqrt_w (equivalent to weighting the information matrix by w).
+
+bool ConfidenceWeightedReprojectionCost::operator()(const double* const pose,
+                                                     const double* const point,
+                                                     double* residuals,
+                                                     double** jacobians) const {
+    double Xc[3];
+    ceres::AngleAxisRotatePoint(pose, point, Xc);
+    Xc[0] += pose[3];
+    Xc[1] += pose[4];
+    Xc[2] += pose[5];
+
+    const double inv_Zc  = 1.0 / Xc[2];
+    const double inv_Zc2 = inv_Zc * inv_Zc;
+
+    const double u_proj = fx * Xc[0] * inv_Zc + cx;
+    const double v_proj = fy * Xc[1] * inv_Zc + cy;
+    residuals[0] = sqrt_w * (u_proj - u_obs);
+    residuals[1] = sqrt_w * (v_proj - v_obs);
+
+    if (!jacobians) return true;
+
+    const double jp00 = fx * inv_Zc;
+    const double jp02 = -fx * Xc[0] * inv_Zc2;
+    const double jp11 = fy * inv_Zc;
+    const double jp12 = -fy * Xc[1] * inv_Zc2;
+
+    const double dXc_dw[3][3] = {
+        {0.0, Xc[2], -Xc[1]}, {-Xc[2], 0.0, Xc[0]}, {Xc[1], -Xc[0], 0.0}};
+
+    if (jacobians[0]) {
+        double* j = jacobians[0];
+        j[0]  = sqrt_w * (jp00 * dXc_dw[0][0] + jp02 * dXc_dw[2][0]);
+        j[1]  = sqrt_w * (jp00 * dXc_dw[0][1] + jp02 * dXc_dw[2][1]);
+        j[2]  = sqrt_w * (jp00 * dXc_dw[0][2] + jp02 * dXc_dw[2][2]);
+        j[3]  = sqrt_w * jp00;
+        j[4]  = 0.0;
+        j[5]  = sqrt_w * jp02;
+        j[6]  = sqrt_w * (jp11 * dXc_dw[1][0] + jp12 * dXc_dw[2][0]);
+        j[7]  = sqrt_w * (jp11 * dXc_dw[1][1] + jp12 * dXc_dw[2][1]);
+        j[8]  = sqrt_w * (jp11 * dXc_dw[1][2] + jp12 * dXc_dw[2][2]);
+        j[9]  = 0.0;
+        j[10] = sqrt_w * jp11;
+        j[11] = sqrt_w * jp12;
+    }
+
+    if (jacobians[1]) {
+        double R[9];
+        ceres::AngleAxisToRotationMatrix(pose, R);
+        double* j = jacobians[1];
+        j[0] = sqrt_w * (jp00 * R[0] + jp02 * R[6]);
+        j[1] = sqrt_w * (jp00 * R[1] + jp02 * R[7]);
+        j[2] = sqrt_w * (jp00 * R[2] + jp02 * R[8]);
+        j[3] = sqrt_w * (jp11 * R[3] + jp12 * R[6]);
+        j[4] = sqrt_w * (jp11 * R[4] + jp12 * R[7]);
+        j[5] = sqrt_w * (jp11 * R[5] + jp12 * R[8]);
+    }
+
+    return true;
+}
+
+class AnalyticConfReprojCostFunction
+    : public ceres::SizedCostFunction<2, 6, 3>  // kNumResiduals=2, kNumPoseParams=6, kNumPointParams=3
+{
+   public:
+    explicit AnalyticConfReprojCostFunction(const ConfidenceWeightedReprojectionCost& cost)
+        : cost_(cost) {}
+    bool Evaluate(double const* const* parameters, double* residuals,
+                  double** jacobians) const override {
+        return cost_(parameters[0], parameters[1], residuals, jacobians);
+    }
+   private:
+    ConfidenceWeightedReprojectionCost cost_;
+};
+
+// confidence-weighted stereo cost
+
+bool ConfidenceWeightedStereoCost::operator()(const double* const pose,
+                                               const double* const point,
+                                               double* residuals,
+                                               double** jacobians) const {
+    double Xc[3];
+    ceres::AngleAxisRotatePoint(pose, point, Xc);
+    Xc[0] += pose[3];
+    Xc[1] += pose[4];
+    Xc[2] += pose[5];
+
+    const double inv_Zc  = 1.0 / Xc[2];
+    const double inv_Zc2 = inv_Zc * inv_Zc;
+
+    const double u_L_proj = fx * Xc[0] * inv_Zc + cx;
+    const double v_L_proj = fy * Xc[1] * inv_Zc + cy;
+    const double u_R_proj = fx * (Xc[0] - baseline) * inv_Zc + cx;
+
+    residuals[0] = sqrt_w * (u_L_proj - u_L_obs);
+    residuals[1] = sqrt_w * (v_L_proj - v_L_obs);
+    residuals[2] = sqrt_w * (u_R_proj - u_R_obs);
+
+    if (!jacobians) return true;
+
+    const double jp00 = fx * inv_Zc;
+    const double jp02 = -fx * Xc[0] * inv_Zc2;
+    const double jp11 = fy * inv_Zc;
+    const double jp12 = -fy * Xc[1] * inv_Zc2;
+    const double jr02 = -fx * (Xc[0] - baseline) * inv_Zc2;
+
+    const double dXc_dw[3][3] = {{0.0, Xc[2], -Xc[1]}, {-Xc[2], 0.0, Xc[0]}, {Xc[1], -Xc[0], 0.0}};
+
+    if (jacobians[0]) {
+        double* j = jacobians[0];  // row-major 3×6
+        j[0]  = sqrt_w * (jp00 * dXc_dw[0][0] + jp02 * dXc_dw[2][0]);
+        j[1]  = sqrt_w * (jp00 * dXc_dw[0][1] + jp02 * dXc_dw[2][1]);
+        j[2]  = sqrt_w * (jp00 * dXc_dw[0][2] + jp02 * dXc_dw[2][2]);
+        j[3]  = sqrt_w * jp00;
+        j[4]  = 0.0;
+        j[5]  = sqrt_w * jp02;
+        j[6]  = sqrt_w * (jp11 * dXc_dw[1][0] + jp12 * dXc_dw[2][0]);
+        j[7]  = sqrt_w * (jp11 * dXc_dw[1][1] + jp12 * dXc_dw[2][1]);
+        j[8]  = sqrt_w * (jp11 * dXc_dw[1][2] + jp12 * dXc_dw[2][2]);
+        j[9]  = 0.0;
+        j[10] = sqrt_w * jp11;
+        j[11] = sqrt_w * jp12;
+        j[12] = sqrt_w * (jp00 * dXc_dw[0][0] + jr02 * dXc_dw[2][0]);
+        j[13] = sqrt_w * (jp00 * dXc_dw[0][1] + jr02 * dXc_dw[2][1]);
+        j[14] = sqrt_w * (jp00 * dXc_dw[0][2] + jr02 * dXc_dw[2][2]);
+        j[15] = sqrt_w * jp00;
+        j[16] = 0.0;
+        j[17] = sqrt_w * jr02;
+    }
+
+    if (jacobians[1]) {
+        double R[9];
+        ceres::AngleAxisToRotationMatrix(pose, R);
+        double* j = jacobians[1];  // row-major 3×3
+        j[0] = sqrt_w * (jp00 * R[0] + jp02 * R[6]);
+        j[1] = sqrt_w * (jp00 * R[1] + jp02 * R[7]);
+        j[2] = sqrt_w * (jp00 * R[2] + jp02 * R[8]);
+        j[3] = sqrt_w * (jp11 * R[3] + jp12 * R[6]);
+        j[4] = sqrt_w * (jp11 * R[4] + jp12 * R[7]);
+        j[5] = sqrt_w * (jp11 * R[5] + jp12 * R[8]);
+        j[6] = sqrt_w * (jp00 * R[0] + jr02 * R[6]);
+        j[7] = sqrt_w * (jp00 * R[1] + jr02 * R[7]);
+        j[8] = sqrt_w * (jp00 * R[2] + jr02 * R[8]);
+    }
+
+    return true;
+}
+
+class AnalyticConfStereoCostFunction
+    : public ceres::SizedCostFunction<3, 6, 3>  // kNumResiduals=3, kNumPoseParams=6, kNumPointParams=3
+{
+   public:
+    explicit AnalyticConfStereoCostFunction(const ConfidenceWeightedStereoCost& cost)
+        : cost_(cost) {}
+    bool Evaluate(double const* const* parameters, double* residuals,
+                  double** jacobians) const override {
+        return cost_(parameters[0], parameters[1], residuals, jacobians);
+    }
+   private:
+    ConfidenceWeightedStereoCost cost_;
+};
+
+// pitch/roll soft constraint — penalizes R[3] and R[5] (zero when level). no height ref so no
+// drift.
 struct PitchRollCost {
     double w_rp;
     template <typename T>
     bool operator()(const T* const pose, T* residuals) const {
         T R[9];
         ceres::AngleAxisToRotationMatrix(pose, R);
-        residuals[0] = T(w_rp) * R[3];   // R(1,0) — roll proxy  → 0 when level
-        residuals[1] = T(w_rp) * R[5];   // R(1,2) — pitch proxy → 0 when level
+        residuals[0] = T(w_rp) * R[3];  // R(1,0) — roll proxy  → 0 when level
+        residuals[1] = T(w_rp) * R[5];  // R(1,2) — pitch proxy → 0 when level
         return true;
     }
     static ceres::CostFunction* Create(double w_rp) {
-        return new ceres::AutoDiffCostFunction<PitchRollCost, 2, 6>(
-            new PitchRollCost{w_rp});
+        return new ceres::AutoDiffCostFunction<PitchRollCost, 2, 6>(new PitchRollCost{w_rp});
     }
 };
 
@@ -230,19 +395,19 @@ struct PosePriorCost {
 
     template <typename T>
     bool operator()(const T* const pose, T* res) const {
-        for (int i = 0; i < 3; ++i) res[i]   = T(w_r) * (pose[i]   - T(prior[i]));
-        for (int i = 0; i < 3; ++i) res[i+3] = T(w_t) * (pose[i+3] - T(prior[i+3]));
+        for (int i = 0; i < 3; ++i) res[i] = T(w_r) * (pose[i] - T(prior[i]));
+        for (int i = 0; i < 3; ++i) res[i + 3] = T(w_t) * (pose[i + 3] - T(prior[i + 3]));
         return true;
     }
 
     static ceres::CostFunction* Create(const double* p, double w_r, double w_t) {
         auto* c = new PosePriorCost;
         std::copy(p, p + 6, c->prior);
-        c->w_r = w_r; c->w_t = w_t;
+        c->w_r = w_r;
+        c->w_t = w_t;
         return new ceres::AutoDiffCostFunction<PosePriorCost, 6, 6>(c);
     }
 };
-
 
 // pose ↔ Isometry3d conversion helpers
 
@@ -348,23 +513,24 @@ void LocalBA::optimize() {
             double* pt = pit->second.data();
             const cv::Point2f& obs = kf->keypoints[kp_idx].pt;
 
+            // Per-keypoint confidence weight (1.0 for ORB mode; L2/LG-derived in hybrid)
+            double w = 1.0;
+            if (kp_idx < (int)kf->match_confidence.size())
+                w = std::max(0.01, (double)kf->match_confidence[kp_idx]);
+
             // use stereo cost (3 residuals) when a valid right-image observation exists
-            if (cam_.is_stereo() &&
-                kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
-                StereoReprojectionCost cost(obs.x, obs.y, kf->uR[kp_idx],
-                                            cam_.fx, cam_.fy, cam_.cx, cam_.cy,
-                                            cam_.baseline);
-                problem.AddResidualBlock(
-                    new AnalyticStereoReprojectionCostFunction(cost), loss, pose, pt);
+            if (cam_.is_stereo() && kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
+                ConfidenceWeightedStereoCost cost(obs.x, obs.y, kf->uR[kp_idx], cam_.fx, cam_.fy,
+                                                  cam_.cx, cam_.cy, cam_.baseline, w);
+                problem.AddResidualBlock(new AnalyticConfStereoCostFunction(cost), loss, pose, pt);
             } else {
-                ReprojectionCost cost(obs.x, obs.y, cam_.fx, cam_.fy, cam_.cx, cam_.cy);
-                problem.AddResidualBlock(
-                    new AnalyticReprojectionCostFunction(cost), loss, pose, pt);
+                ConfidenceWeightedReprojectionCost cost(obs.x, obs.y, cam_.fx, cam_.fy, cam_.cx,
+                                                        cam_.cy, w);
+                problem.AddResidualBlock(new AnalyticConfReprojCostFunction(cost), loss, pose, pt);
             }
         }
 
         problem.AddParameterBlock(pose, 6);
-
     }
 
     // add point parameter blocks
@@ -382,9 +548,8 @@ void LocalBA::optimize() {
     if (cam_.is_stereo()) {
         for (auto& kf : window) {
             if (kf == window.front()) continue;
-            problem.AddResidualBlock(
-                PitchRollCost::Create(30.0),
-                nullptr, pose_params[kf->id].data());
+            problem.AddResidualBlock(PitchRollCost::Create(30.0), nullptr,
+                                     pose_params[kf->id].data());
         }
     }
 
@@ -393,9 +558,8 @@ void LocalBA::optimize() {
         if (kf == window.front()) continue;  // anchor is fixed — skip
         auto it = prior_poses.find(kf->id);
         if (it == prior_poses.end()) continue;
-        problem.AddResidualBlock(
-            PosePriorCost::Create(it->second.data(), 0.5, 0.5),
-            nullptr, pose_params[kf->id].data());
+        problem.AddResidualBlock(PosePriorCost::Create(it->second.data(), 0.5, 0.5), nullptr,
+                                 pose_params[kf->id].data());
     }
 
     // 5. solve
@@ -426,7 +590,7 @@ void LocalBA::optimize() {
 
     // 8. post-BA culling — mark points with >6px reprojection error as bad
     {
-        const double cull_thresh2 = 36.0;   // 6 px²
+        const double cull_thresh2 = 36.0;  // 6 px²
         for (auto& kf : window) {
             const double* pose = pose_params.at(kf->id).data();
             for (int kp_idx = 0; kp_idx < (int)kf->keypoints.size(); ++kp_idx) {
@@ -438,27 +602,34 @@ void LocalBA::optimize() {
 
                 double Xc[3];
                 ceres::AngleAxisRotatePoint(pose, pt, Xc);
-                Xc[0] += pose[3]; Xc[1] += pose[4]; Xc[2] += pose[5];
-                if (Xc[2] <= 0.0) { mp->is_bad = true; continue; }
-
-                // cull stereo points beyond 150m — depth is unreliable at that range
-                if (cam_.is_stereo() &&
-                    kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f &&
-                    Xc[2] > 150.0) {
-                    mp->is_bad = true; continue;
+                Xc[0] += pose[3];
+                Xc[1] += pose[4];
+                Xc[2] += pose[5];
+                if (Xc[2] <= 0.0) {
+                    mp->is_bad = true;
+                    continue;
                 }
 
-                double u  = cam_.fx * Xc[0] / Xc[2] + cam_.cx;
-                double v  = cam_.fy * Xc[1] / Xc[2] + cam_.cy;
+                // cull stereo points beyond 150m — depth is unreliable at that range
+                if (cam_.is_stereo() && kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f &&
+                    Xc[2] > 150.0) {
+                    mp->is_bad = true;
+                    continue;
+                }
+
+                double u = cam_.fx * Xc[0] / Xc[2] + cam_.cx;
+                double v = cam_.fy * Xc[1] / Xc[2] + cam_.cy;
                 double du = u - kf->keypoints[kp_idx].pt.x;
                 double dv = v - kf->keypoints[kp_idx].pt.y;
-                if (du*du + dv*dv > cull_thresh2) { mp->is_bad = true; continue; }
+                if (du * du + dv * dv > cull_thresh2) {
+                    mp->is_bad = true;
+                    continue;
+                }
 
                 // also cull if right-camera reprojection exceeds threshold
-                if (cam_.is_stereo() &&
-                    kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
-                    double u_R  = cam_.fx * (Xc[0] - cam_.baseline) / Xc[2] + cam_.cx;
-                    double dur  = u_R - kf->uR[kp_idx];
+                if (cam_.is_stereo() && kp_idx < (int)kf->uR.size() && kf->uR[kp_idx] >= 0.0f) {
+                    double u_R = cam_.fx * (Xc[0] - cam_.baseline) / Xc[2] + cam_.cx;
+                    double dur = u_R - kf->uR[kp_idx];
                     if (dur * dur > cull_thresh2) mp->is_bad = true;
                 }
             }

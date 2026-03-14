@@ -1,0 +1,10 @@
+[0/1] Install the project...
+-- Install configuration: "RELEASE"
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/lib/mimalloc-2.0/mimalloc-static.lib
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/lib/cmake/mimalloc-2.0/mimalloc.cmake
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/lib/cmake/mimalloc-2.0/mimalloc-release.cmake
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/include/mimalloc-2.0/mimalloc.h
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/include/mimalloc-2.0/mimalloc-override.h
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/include/mimalloc-2.0/mimalloc-new-delete.h
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/lib/cmake/mimalloc-2.0/mimalloc-config.cmake
+-- Installing: C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/mimalloc_ep/src/mimalloc_ep/lib/cmake/mimalloc-2.0/mimalloc-config-version.cmake

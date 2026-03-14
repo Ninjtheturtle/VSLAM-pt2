@@ -1,0 +1,35 @@
+-- Downloading...
+   dst='C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/src/13.0.0.tar.gz'
+   timeout='none'
+   inactivity timeout='none'
+-- Using src='https://github.com/xtensor-stack/xsimd/archive/13.0.0.tar.gz'
+-- [download 3% complete]
+-- [download 10% complete]
+-- [download 14% complete]
+-- [download 21% complete]
+-- [download 27% complete]
+-- [download 34% complete]
+-- [download 36% complete]
+-- [download 43% complete]
+-- [download 48% complete]
+-- [download 55% complete]
+-- [download 61% complete]
+-- [download 67% complete]
+-- [download 74% complete]
+-- [download 79% complete]
+-- [download 85% complete]
+-- [download 89% complete]
+-- [download 95% complete]
+-- [download 98% complete]
+-- [download 100% complete]
+-- verifying file...
+       file='C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/src/13.0.0.tar.gz'
+-- Downloading... done
+-- extracting...
+     src='C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/src/13.0.0.tar.gz'
+     dst='C:/Users/nengj/OneDrive/Desktop/VSLAM/build_hybrid/arrow/src/arrow_cpp-build/src/xsimd_ep'
+-- extracting... [tar xfz]
+-- extracting... [analysis]
+-- extracting... [rename]
+-- extracting... [clean up]
+-- extracting... done

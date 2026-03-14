@@ -3,6 +3,7 @@
 #include "slam/camera.hpp"
 #include "slam/map.hpp"
 #include <memory>
+#include <cmath>  // std::sqrt
 
 namespace slam {
 
@@ -91,6 +92,63 @@ struct StereoReprojectionCost {
           fx(fx_), fy(fy_), cx(cx_), cy(cy_), baseline(b) {}
 
     // residuals[3] = [u_L - u_L_obs, v_L - v_L_obs, u_R - u_R_obs]
+    bool operator()(const double* const pose,
+                    const double* const point,
+                    double* residuals,
+                    double** jacobians) const;
+
+    static constexpr int kNumResiduals   = 3;
+    static constexpr int kNumPoseParams  = 6;
+    static constexpr int kNumPointParams = 3;
+};
+
+// ─── Confidence-Weighted variants ─────────────────────────────────────────────
+//
+// Scales residuals (and Jacobians) by sqrt(weight), which is mathematically
+// equivalent to multiplying the information matrix Σ⁻¹ by weight.
+//
+// weight = frame->match_confidence[kp_idx], sourced from:
+//   • Temporal tracking: L2 ratio pseudo-confidence ∈ [0.1, 1.0]
+//   • LighterGlue relocalization: raw output probability ∈ [0, 1]
+//
+// When weight == 1.0 these reduce to the original ReprojectionCost /
+// StereoReprojectionCost, preserving backward compatibility.
+
+struct ConfidenceWeightedReprojectionCost {
+    double u_obs, v_obs;
+    double fx, fy, cx, cy;
+    double sqrt_w;  // = sqrt(match_confidence)
+
+    ConfidenceWeightedReprojectionCost(double u, double v,
+                                       double fx_, double fy_,
+                                       double cx_, double cy_,
+                                       double weight)
+        : u_obs(u), v_obs(v), fx(fx_), fy(fy_), cx(cx_), cy(cy_),
+          sqrt_w(std::sqrt(std::max(weight, 0.01))) {}
+
+    bool operator()(const double* const pose,
+                    const double* const point,
+                    double* residuals,
+                    double** jacobians) const;
+
+    static constexpr int kNumResiduals   = 2;
+    static constexpr int kNumPoseParams  = 6;
+    static constexpr int kNumPointParams = 3;
+};
+
+struct ConfidenceWeightedStereoCost {
+    double u_L_obs, v_L_obs, u_R_obs;
+    double fx, fy, cx, cy, baseline;
+    double sqrt_w;
+
+    ConfidenceWeightedStereoCost(double uL, double vL, double uR,
+                                 double fx_, double fy_,
+                                 double cx_, double cy_,
+                                 double b, double weight)
+        : u_L_obs(uL), v_L_obs(vL), u_R_obs(uR),
+          fx(fx_), fy(fy_), cx(cx_), cy(cy_), baseline(b),
+          sqrt_w(std::sqrt(std::max(weight, 0.01))) {}
+
     bool operator()(const double* const pose,
                     const double* const point,
                     double* residuals,
